@@ -133,18 +133,23 @@ def find_label_line(lines, target_norm):
             return ln
     return None
 
-def detect_horizontal_line_blank(page, label_right, label_y_mid):
+# --- replace your detect_horizontal_line_blank with this ---
+def detect_horizontal_line_blank(page, label_right, label_y_mid, y_window=HLINE_Y_TOL):
+    """
+    Look for a horizontal vector line at approximately the given y, and to the right of the label.
+    """
     for d in page["drawings"]:
         pts = d.get("points")
         if not pts or len(pts) < 2:
             continue
         for i in range(len(pts) - 1):
             (x0, y0), (x1, y1) = pts[i], pts[i+1]
-            if abs(y0 - y1) <= 0.5:
+            # horizontal line?
+            if abs(y0 - y1) <= 0.6:
                 length = abs(x1 - x0)
                 if length >= MIN_HLINE_LEN:
                     y_line = (y0 + y1) / 2.0
-                    if abs(y_line - label_y_mid) <= HLINE_Y_TOL:
+                    if abs(y_line - label_y_mid) <= y_window:
                         x_left, x_right = min(x0, x1), max(x0, x1)
                         if x_right > label_right + 4:
                             y_top = y_line - BLANK_TOP_PAD
@@ -152,37 +157,88 @@ def detect_horizontal_line_blank(page, label_right, label_y_mid):
                             return [x_left, y_top, x_right, y_bot]
     return None
 
-def detect_blank_region_on_line(line, label_span_idx, page):
+
+def _line_has_underline_spans(spans, x_min, min_len=UNDERLINE_MIN_LEN):
+    for s in spans:
+        txt = s["text"]
+        if not txt:
+            continue
+        if s["bbox"][0] < x_min - 0.5:
+            continue
+        if ("_" * min_len) in txt or ("." * DOTLINE_MIN_LEN) in txt:
+            return [s["bbox"][0], s["bbox"][1], s["bbox"][2], s["bbox"][3]]
+    return None
+
+
+def detect_blank_region_near_label(lines, line_index, label_span_idx, page, label_right):
+    """
+    Try, in this order:
+      1) Horizontal rule on the same line as the label (right of it)
+      2) Underline/dotted spans on the same line (right of it)
+      3) Horizontal rule within ~1 line below
+      4) Underline/dotted spans in the next 1-2 lines below
+      5) Fallback gap region to the right (same line)
+      6) Very conservative right-side region toward page margin
+    """
+    line = lines[line_index]
     spans = line["spans"]
     y_top = min(s["bbox"][1] for s in spans)
     y_bot = max(s["bbox"][3] for s in spans)
-    label_right = spans[label_span_idx]["bbox"][2] if label_span_idx is not None else min(s["bbox"][0] for s in spans)
 
-    # Prefer explicit horizontal line
-    h_blank = detect_horizontal_line_blank(page, label_right, line["y_mid"])
+    # 1) horizontal rule on this line
+    h_blank = detect_horizontal_line_blank(page, label_right, line["y_mid"], y_window=HLINE_Y_TOL)
     if h_blank:
         return h_blank
 
-    # Underline/dotted spans
+    # 2) underline/dots on this line (to the right of label)
     right_spans = [s for s in spans if s["bbox"][0] >= label_right - 0.5]
-    for s in right_spans:
-        txt = s["text"]
-        if txt and (("_" * UNDERLINE_MIN_LEN) in txt or ("." * DOTLINE_MIN_LEN) in txt):
-            return [s["bbox"][0], y_top, s["bbox"][2], y_bot]
+    ul = _line_has_underline_spans(right_spans, label_right)
+    if ul:
+        return [ul[0], y_top, ul[2], y_bot]
 
-    # Gap to next span
+    # 3) horizontal rule on the next line down (sometimes the blank is below)
+    if line_index + 1 < len(lines):
+        below = lines[line_index + 1]
+        h_blank_below = detect_horizontal_line_blank(page, label_right, below["y_mid"], y_window=HLINE_Y_TOL + 6)
+        if h_blank_below:
+            return h_blank_below
+
+    # 4) underline/dots in the next 1–2 lines below
+    for j in (line_index + 1, line_index + 2):
+        if 0 <= j < len(lines):
+            l2 = lines[j]
+            ul2 = _line_has_underline_spans(l2["spans"], label_right)
+            if ul2:
+                y_top2 = min(s["bbox"][1] for s in l2["spans"])
+                y_bot2 = max(s["bbox"][3] for s in l2["spans"])
+                return [ul2[0], y_top2, ul2[2], y_bot2]
+
+    # 5) gap to next span on the same line
     if right_spans:
         nxt = right_spans[0]
         x0 = label_right + FALLBACK_GAP
         x1 = max(x0 + 120, nxt["bbox"][0] - 3)
         return [x0, y_top, x1, y_bot]
 
-    # Conservative fallback
+    # 6) conservative right-side region
     pw = page["width"]
     x0 = label_right + FALLBACK_GAP
     x1 = max(x0 + 140, pw - RIGHT_MARGIN_PAD)
     return [x0, y_top, x1, y_bot]
 
+# --- replace your detect_blank_region_on_line with this (now calls the new helper) ---
+def detect_blank_region_on_line(line, label_span_idx, page, all_lines, line_index):
+    spans = line["spans"]
+    label_right = spans[label_span_idx]["bbox"][2] if label_span_idx is not None else min(s["bbox"][0] for s in spans)
+
+    blank_bbox = detect_blank_region_near_label(all_lines, line_index, label_span_idx, page, label_right)
+    if blank_bbox:
+        x0, y0, x1, y1 = blank_bbox
+        x1 = min(x1, page["width"] - RIGHT_MARGIN_PAD)
+        return [x0, y0, x1, y1]
+    return None
+
+# --- replace your find_anchors_and_blanks with this (passes all_lines & line_index) ---
 def find_anchors_and_blanks(pages, fields):
     placements = {}
     for f in fields:
@@ -194,7 +250,14 @@ def find_anchors_and_blanks(pages, fields):
         for p in cand_pages:
             spans = pages[p]["spans"]
             lines = group_spans_by_line(spans)
-            ln = find_label_line(lines, target)
+            ln = None
+            ln_idx = -1
+            for idx, L in enumerate(lines):
+                line_text = " ".join(s["text"] for s in L["spans"])
+                if target in _norm(line_text):
+                    ln = L
+                    ln_idx = idx
+                    break
             if not ln:
                 continue
 
@@ -213,12 +276,7 @@ def find_anchors_and_blanks(pages, fields):
                 ye = [s["bbox"][3] for s in ln["spans"]]
                 anchor_bbox = [min(xs), min(ys), max(xe), max(ye)]
 
-            blank_bbox = detect_blank_region_on_line(ln, label_span_idx, pages[p])
-            if blank_bbox:
-                x0, y0, x1, y1 = blank_bbox
-                x1 = min(x1, pages[p]["width"] - RIGHT_MARGIN_PAD)
-                blank_bbox = [x0, y0, x1, y1]
-
+            blank_bbox = detect_blank_region_on_line(ln, label_span_idx, pages[p], lines, ln_idx)
             found = {"page": p+1, "anchor_bbox": anchor_bbox, "blank_bbox": blank_bbox}
             break
 
@@ -226,6 +284,7 @@ def find_anchors_and_blanks(pages, fields):
             placements[f["name"]] = found
 
     return placements
+
 
 def draw_debug_boxes(doc, placements, color=(1,0,0)):
     for name, info in placements.items():
@@ -376,25 +435,63 @@ def wrap_text(s, width):
     if cur: lines.append(" ".join(cur))
     return lines or [""]
 
-def render_answers_draw(pdf_in, pdf_out, placements, answers):
+# --- replace your render_answers_draw with this version ---
+def render_answers_draw(pdf_in, pdf_out, placements, answers, fields_meta=None):
+    """
+    Draw text into detected blanks. For checkbox/boolean fields without widgets,
+    draw a centered checkmark instead of the text 'Yes'.
+    """
+    fields_meta = fields_meta or []
+    meta_by_name = {f["name"]: f for f in fields_meta}
+
     doc = fitz.open(pdf_in)
     if DEBUG: draw_debug_boxes(doc, placements, color=(0,0,1))
+
     for name, info in placements.items():
         val = answers.get(name)
         if val in (None, ""):
             continue
+
         page = doc[info["page"] - 1]
         target = info.get("blank_bbox") or info.get("anchor_bbox")
         if not target:
             continue
+
         x0, y0, x1, y1 = target
+        fmeta = meta_by_name.get(name, {})
+        ftype = (fmeta.get("type") or "text").lower()
+
+        # Handle checkboxes/booleans specially
+        if ftype in ("boolean", "checkbox"):
+            vnorm = _norm(val)
+            is_yes = vnorm in ("yes","y","true","1","checked")
+            if is_yes:
+                # Draw a crisp checkmark centered in the box
+                cx = (x0 + x1) / 2.0
+                cy = (y0 + y1) / 2.0
+                # Choose a font size that fits the box nicely
+                box_h = max(8, (y1 - y0))
+                fs = min(14, max(10, box_h - 2))
+                page.insert_text((cx, cy), "✓",
+                                 fontname=TEXT_FONT,  # helv contains ✓ in modern viewers
+                                 fontsize=fs,
+                                 color=(0,0,0),
+                                 render_mode=0,
+                                 align=1)   # center on the point
+            # If No/unchecked: draw nothing (leave the box empty)
+            continue
+
+        # Normal text fields
         x = x0 + LEFT_INSET
         baseline = y0 + TOP_INSET + (y1 - y0) * 0.65
         text = str(val)
         for i, line in enumerate(wrap_text(text, MAX_CHARS_PER_LINE)):
-            page.insert_text((x, baseline - i*LINE_LEADING), line, fontname=TEXT_FONT, fontsize=TEXT_SIZE, fill=(0,0,0))
+            page.insert_text((x, baseline - i*LINE_LEADING), line,
+                             fontname=TEXT_FONT, fontsize=TEXT_SIZE, fill=(0,0,0))
+
     doc.save(pdf_out)
     doc.close()
+
 
 # =========================
 # VALIDATION
@@ -644,7 +741,26 @@ def main():
             focus_names += next_opt[:6]
         focus_subset = [name_to_field[n] for n in focus_names if n in name_to_field]
 
+        # >>> HARD GUARD: don't ask about already-answered or locked fields
+        askable = []
+        for f in focus_subset:
+            fname = f["name"]
+            already = (fname in locked) or (fname in known and known[fname] not in (None, ""))
+            if not already:
+                askable.append(f)
+
+        # If nothing is left to ask (planner would just repeat), recompute next loop iteration
+        if not askable:
+            # If all required are done, we'll eventually break; otherwise the loop
+            # will calculate a new focus set on the next iteration.
+            continue
+
+        # Use askable instead of focus_subset from here on:
+        focus_subset = askable
+
+
         last_q = llm_plan(known, invalid, focus_subset, max_q, have_required_done, offered_optional, locked=list(locked))
+
         print("\nBot:", last_q)
         user = input("You: ")
         if user.lower().strip() in ("quit","exit"):
@@ -720,10 +836,10 @@ def main():
         if filled:
             print(f"\n✅ Done! Filled AcroForm fields → {pdf_out}")
         else:
-            render_answers_draw(pdf_in, pdf_out, placements, known)
+            render_answers_draw(pdf_in, pdf_out, placements, known, fields_meta=fields)
             print(f"\n✅ Done! Drew text into blanks → {pdf_out}")
     else:
-        render_answers_draw(pdf_in, pdf_out, placements, known)
+        render_answers_draw(pdf_in, pdf_out, placements, known, fields_meta=fields)
         print(f"\n✅ Done! Drew text into blanks → {pdf_out}")
 
 if __name__ == "__main__":
