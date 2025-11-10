@@ -29,12 +29,12 @@ _No PDF filling here (intake only)._
 
 ### 1) Create a virtual environment & install dependencies
 
-**Windows (PowerShell):**
-```powershell
+**Windows (PowerShell/CMD):**
+```bat
 cd C:\path\to\your\project
 python -m venv venv
-.env\Scripts\Activate.ps1
-pip install fastapi uvicorn "pydantic<2" python-dotenv openai httpx PyMuPDF python-dateutil
+venv\Scripts\activate
+pip install fastapi uvicorn "pydantic<2" python-dotenv openai httpx PyMuPDF python-dateutil python-multipart
 ```
 
 **macOS/Linux:**
@@ -42,8 +42,10 @@ pip install fastapi uvicorn "pydantic<2" python-dotenv openai httpx PyMuPDF pyth
 cd /path/to/your/project
 python3 -m venv venv
 source venv/bin/activate
-pip install fastapi uvicorn "pydantic<2" python-dotenv openai httpx PyMuPDF python-dateutil
+pip install fastapi uvicorn "pydantic<2" python-dotenv openai httpx PyMuPDF python-dateutil python-multipart
 ```
+
+> `python-multipart` is required for `UploadFile` (form-data uploads).
 
 ### 2) Add your OpenAI key (no hard-coding)
 
@@ -58,7 +60,7 @@ OPENAI_API_KEY=sk-...your_openai_key...
 ### 3) Run the API
 
 ```bash
-python -m uvicorn app:app --port 8000
+python -m uvicorn live_conversational_chatbot:app --port 8000
 ```
 - Swagger UI: <http://127.0.0.1:8000/docs>  
 - ReDoc: <http://127.0.0.1:8000/redoc>  
@@ -72,7 +74,8 @@ python -m uvicorn app:app --port 8000
 
 ### 1) Start a session (upload PDF)
 ```bash
-curl -F "file=@C:\path\to\form.pdf"      http://127.0.0.1:8000/intake/start
+curl -F "file=@C:\path\to\form.pdf" \
+     http://127.0.0.1:8000/intake/start
 ```
 Response includes:
 ```json
@@ -86,12 +89,16 @@ Response includes:
 
 ### 2) Chat values in (repeat until done)
 ```bash
-curl -X POST http://127.0.0.1:8000/intake/message   -H "Content-Type: application/json"   -d "{"session_id":"<SID>","user_text":"First name Jane, last name Doe"}"
+curl -X POST http://127.0.0.1:8000/intake/message \
+  -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"<SID>\",\"user_text\":\"First name Jane, last name Doe\"}"
 ```
 
 ### 3) (Optional) Bulk set values
 ```bash
-curl -X POST http://127.0.0.1:8000/intake/set-values   -H "Content-Type: application/json"   -d "{"session_id":"<SID>","values":{"email":"jane@doe.com","dob":"1990-05-01"}}"
+curl -X POST http://127.0.0.1:8000/intake/set-values \
+  -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"<SID>\",\"values\":{\"email\":\"jane@doe.com\",\"dob\":\"1990-05-01\"}}"
 ```
 
 ### 4) Get final JSON
@@ -118,11 +125,11 @@ Import OpenAPI: paste `http://127.0.0.1:8000/openapi.json` into Postman.
 
 ---
 
-## Behavior & Validation
+## Validation & N/A behavior
 
 - “N/A / not applicable / leave blank”:
   - **Boolean/checkbox** → coerced to `"No"`.
-  - All other types → value omitted (`null` in JSON if `omit_nulls=false`).
+  - Other types → value omitted (`null` in JSON if `omit_nulls=false`).
 - Dates parsed via `python-dateutil` with policy (e.g., DOB can’t be future).
 - Emails/phones validated with simple regexes.
 
@@ -130,48 +137,31 @@ Import OpenAPI: paste `http://127.0.0.1:8000/openapi.json` into Postman.
 
 ## Troubleshooting
 
-- **Port in use (Windows WinError 10048)**  
-  Find & kill process:
-  ```bat
-  netstat -ano | findstr :8000
-  taskkill /PID <PID> /F
-  ```
-  Or run on a different port: `--port 8001`.
-
-- **`/docs` loading slowly**  
-  Try `/redoc` or run without reload:
-  ```bash
-  python -m uvicorn app:app --port 8000
-  ```
-
-- **Empty/poor field extraction**  
-  Ensure the PDF contains selectable text (not just scanned images).
-
-- **OPENAI_KEY not picked up**  
-  Confirm `.env` exists at project root and is spelled exactly `.env`.  
-  Or set it in your shell:
-  - **Windows PowerShell**: `$env:OPENAI_API_KEY="sk-..."`
-  - **macOS/Linux**: `export OPENAI_API_KEY="sk-..."`
-
----
-
-## .gitignore (recommended)
-
-```
-venv/
-.env
-__pycache__/
-*.pyc
-data/
-*.pdf
-*.log
+### Missing `python-multipart`
+Error: `Form data requires "python-multipart" to be installed.`  
+**Fix:**
+```bat
+venv\Scripts\activate
+python -m pip install python-multipart
 ```
 
----
+### Port already in use (Windows WinError 10048)
+```bat
+netstat -ano | findstr :8000
+taskkill /PID <PID> /F
+python -m uvicorn live_conversational_chatbot:app --port 8000
+```
+Or change port: `--port 8001`
 
-## Example flow (concise)
+### `/docs` slow to load
+Use `/redoc`, or run without reload:
+```bat
+python -m uvicorn live_conversational_chatbot:app --port 8000
+```
 
-1. `POST /intake/start` → get `session_id`  
-2. `POST /intake/message` (repeat) or `POST /intake/set-values`  
-3. `GET /intake/json`  
-4. `GET /intake/status`
+### OpenAI key not detected
+Ensure `.env` exists at project root (spelled exactly). Or set in shell:
+- **Windows PowerShell/CMD**: `set OPENAI_API_KEY=sk-...`
+- **macOS/Linux**: `export OPENAI_API_KEY=sk-...`
+
+
